@@ -157,10 +157,12 @@ function createServer(): Server {
 
           if (args.card) {
             // Post with Adaptive Card attachment
+            // Microsoft Teams API requires an attachment marker in the body content
+            const textContent = args.text ? args.text + ' ' : '';
             messageBody = {
               body: {
                 contentType: 'html',
-                content: args.text || '',
+                content: textContent + '<attachment id="1"></attachment>',
               },
               attachments: [
                 {

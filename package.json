@@ -1,6 +1,6 @@
 {
   "name": "@bugzy-ai/teams-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An MCP server for Microsoft Teams messaging and channel operations with stdio transport",
   "main": "dist/index.js",
   "type": "module",
