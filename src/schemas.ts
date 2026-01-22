@@ -1,67 +1,11 @@
 import { z } from 'zod';
 
-//
-// Basic schemas for Microsoft Graph API responses
-//
-
-export const TeamSchema = z
-  .object({
-    id: z.string(),
-    displayName: z.string().nullish(),
-    description: z.string().nullish(),
-    isArchived: z.boolean().nullish(),
-    createdDateTime: z.string().nullish(),
-  })
-  .strip();
-
-export const ChannelSchema = z
-  .object({
-    id: z.string(),
-    displayName: z.string().nullish(),
-    description: z.string().nullish(),
-    membershipType: z.string().nullish(),
-    createdDateTime: z.string().nullish(),
-    webUrl: z.string().nullish(),
-  })
-  .strip();
-
-const MessageFromSchema = z
-  .object({
-    user: z
-      .object({
-        displayName: z.string().nullish(),
-        id: z.string().nullish(),
-      })
-      .nullish(),
-    application: z
-      .object({
-        displayName: z.string().nullish(),
-        id: z.string().nullish(),
-      })
-      .nullish(),
-  })
-  .strip();
-
-const MessageBodySchema = z
-  .object({
-    content: z.string().nullish(),
-    contentType: z.string().nullish(),
-  })
-  .strip();
-
-export const MessageSchema = z
-  .object({
-    id: z.string(),
-    body: MessageBodySchema.nullish(),
-    from: MessageFromSchema.nullish(),
-    createdDateTime: z.string().nullish(),
-    lastModifiedDateTime: z.string().nullish(),
-    replyToId: z.string().nullish(),
-    subject: z.string().nullish(),
-    importance: z.string().nullish(),
-    webUrl: z.string().nullish(),
-  })
-  .strip();
+/**
+ * Teams MCP Server Schemas
+ *
+ * Simplified schemas for Bot Connector API integration.
+ * Only 2 tools: teams_post_message and teams_post_rich_message
+ */
 
 //
 // Adaptive Card Schemas
@@ -128,6 +72,7 @@ const CardElementSchema: z.ZodType<unknown> = z.lazy(() =>
     FactSetSchema,
     ColumnSetSchema,
     ContainerSchema,
+    ActionSetSchema,
   ])
 );
 
@@ -160,6 +105,19 @@ const ContainerSchema = z.object({
   separator: z.boolean().optional(),
 });
 
+const ActionSchema = z.object({
+  type: z.enum(['Action.Submit', 'Action.OpenUrl', 'Action.ShowCard']),
+  title: z.string(),
+  data: z.unknown().optional(),
+  url: z.string().optional(),
+  style: z.enum(['default', 'positive', 'destructive']).optional(),
+});
+
+const ActionSetSchema = z.object({
+  type: z.literal('ActionSet'),
+  actions: z.array(ActionSchema),
+});
+
 export const AdaptiveCardSchema = z.object({
   type: z.literal('AdaptiveCard'),
   version: z.string().default('1.4'),
@@ -171,112 +129,62 @@ export const AdaptiveCardSchema = z.object({
         FactSetSchema,
         ColumnSetSchema,
         ContainerSchema,
+        ActionSetSchema,
       ])
     )
     .max(50),
+  actions: z.array(ActionSchema).optional(),
   $schema: z.string().optional(),
 });
 
+export type AdaptiveCard = z.infer<typeof AdaptiveCardSchema>;
+
 //
-// Request Schemas
+// Request Schemas for Bot Connector API
 //
 
-export const ListTeamsRequestSchema = z.object({}).describe('No parameters required - lists all teams the user has joined');
-
-export const ListChannelsRequestSchema = z.object({
-  team_id: z.string().describe('The ID of the team to list channels for'),
-});
-
+/**
+ * Schema for teams_post_message tool
+ *
+ * Posts a plain text message to the connected Teams channel.
+ * Channel info comes from environment variables (TEAMS_SERVICE_URL, TEAMS_CONVERSATION_ID).
+ */
 export const PostMessageRequestSchema = z.object({
-  team_id: z.string().describe('The ID of the team'),
-  channel_id: z.string().describe('The ID of the channel to post to'),
   text: z
     .string()
-    .describe('The message text to post (supports HTML formatting)'),
-  reply_to_id: z
+    .describe('The message text to post. Supports markdown formatting.'),
+  thread_id: z
     .string()
     .optional()
-    .describe('Message ID to reply to in a thread'),
+    .describe(
+      'Activity ID to reply to in a thread. If not provided and TEAMS_THREAD_ID env var is set, will reply to that thread.'
+    ),
 });
 
+/**
+ * Schema for teams_post_rich_message tool
+ *
+ * Posts a rich message with Adaptive Card to the connected Teams channel.
+ */
 export const PostRichMessageRequestSchema = z
   .object({
-    team_id: z.string().describe('The ID of the team'),
-    channel_id: z.string().describe('The ID of the channel to post to'),
     text: z
       .string()
       .optional()
-      .describe('Fallback text for notifications. Required if card is not provided.'),
+      .describe(
+        'Fallback text for notifications and screen readers. Required if card is not provided.'
+      ),
     card: AdaptiveCardSchema.optional().describe(
-      'Adaptive Card JSON for rich formatting. Required if text is not provided.'
+      'Adaptive Card JSON for rich formatting. Use this for structured content like test results, status updates, etc.'
     ),
-    reply_to_id: z
+    thread_id: z
       .string()
       .optional()
-      .describe('Message ID to reply to in a thread'),
+      .describe(
+        'Activity ID to reply to in a thread. If not provided and TEAMS_THREAD_ID env var is set, will reply to that thread.'
+      ),
   })
   .refine((data) => data.text || data.card, {
     message: 'Either text or card must be provided',
     path: ['text', 'card'],
   });
-
-export const GetChannelHistoryRequestSchema = z.object({
-  team_id: z.string().describe('The ID of the team'),
-  channel_id: z
-    .string()
-    .describe(
-      'The ID of the channel. Use this to get recent messages from a channel.'
-    ),
-  top: z
-    .number()
-    .int()
-    .min(1)
-    .max(50)
-    .optional()
-    .default(20)
-    .describe('Maximum number of messages to retrieve (default 20, max 50)'),
-});
-
-export const GetThreadRepliesRequestSchema = z.object({
-  team_id: z.string().describe('The ID of the team'),
-  channel_id: z.string().describe('The ID of the channel containing the thread'),
-  message_id: z
-    .string()
-    .describe('The ID of the parent message to get replies for'),
-  top: z
-    .number()
-    .int()
-    .min(1)
-    .max(50)
-    .optional()
-    .default(20)
-    .describe('Maximum number of replies to retrieve (default 20, max 50)'),
-});
-
-//
-// Response Schemas
-//
-
-const BaseResponseSchema = z
-  .object({
-    '@odata.context': z.string().optional(),
-    '@odata.count': z.number().optional(),
-    '@odata.nextLink': z.string().optional(),
-  })
-  .strip();
-
-export const ListTeamsResponseSchema = BaseResponseSchema.extend({
-  value: z.array(TeamSchema),
-});
-
-export const ListChannelsResponseSchema = BaseResponseSchema.extend({
-  value: z.array(ChannelSchema),
-});
-
-export const GetMessagesResponseSchema = BaseResponseSchema.extend({
-  value: z.array(MessageSchema),
-});
-
-export const GetRepliesResponseSchema = BaseResponseSchema.extend({
-  value: z.array(MessageSchema),
-});

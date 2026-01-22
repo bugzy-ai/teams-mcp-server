@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Model Context Protocol (MCP) server that provides AI assistants with standardized access to Microsoft Teams APIs via Microsoft Graph. It's written in TypeScript and uses stdio transport for direct integration.
+This is a Model Context Protocol (MCP) server that allows AI assistants to post messages to Microsoft Teams channels via the Bot Connector API. It's used by the Bugzy agent to send notifications and responses to Teams.
+
+**Version 0.2.0** - Rewritten to use Bot Connector API (previously used Microsoft Graph API).
 
 ## Development Commands
 
@@ -19,93 +21,81 @@ This is a Model Context Protocol (MCP) server that provides AI assistants with s
 
 ## Architecture
 
-### Core Structure
-The server follows a schema-driven design pattern:
+### Bot Connector API (New in v0.2.0)
 
-1. **Request/Response Schemas** (`src/schemas.ts`):
-   - All Microsoft Graph API interactions are validated with Zod schemas
-   - Request schemas define input parameters
-   - Response schemas filter API responses to only necessary fields
-   - Adaptive Card schemas for rich message formatting
+The server now uses the **Bot Connector REST API** instead of Microsoft Graph API. This enables:
+- Posting messages as the Bugzy bot (not as a user)
+- Integration with Azure Bot Service
+- Proper bot identity in Teams
 
-2. **Main Server** (`src/index.ts`):
-   - Stdio-only transport for CLI integration
-   - Tool registration and request handling
-   - Microsoft Graph client initialization
+### Environment Variables
 
-### Transport Mode
-- **Stdio only**: For CLI integration (Claude Desktop, etc.)
+Required variables (set by the execution context):
+
+```bash
+# Bot credentials (from Azure Bot Service)
+TEAMS_BOT_APP_ID=<Azure Bot App ID>
+TEAMS_BOT_APP_PASSWORD=<Azure Bot App Password>
+
+# Conversation context (from stored conversation reference)
+TEAMS_SERVICE_URL=<Bot Connector service URL, e.g., https://smba.trafficmanager.net/...>
+TEAMS_CONVERSATION_ID=<Teams conversation/channel ID>
+
+# Optional
+TEAMS_THREAD_ID=<Activity ID to reply to in a thread>
+```
 
 ### Available Tools
 
-**6 tools for Teams operations:**
+**2 tools for posting to Teams:**
 
-| Tool | Description | Microsoft Graph API |
-|------|-------------|---------------------|
-| `teams_list_teams` | List all teams the user has joined | `GET /me/joinedTeams` |
-| `teams_list_channels` | List channels in a team | `GET /teams/{id}/channels` |
-| `teams_post_message` | Post text/HTML message to channel or thread | `POST /teams/{id}/channels/{id}/messages` |
-| `teams_post_rich_message` | Post Adaptive Card to channel or thread | Same endpoint with attachment |
-| `teams_get_channel_history` | Get recent channel messages | `GET /teams/{id}/channels/{id}/messages` |
-| `teams_get_thread_replies` | Get replies to a message | `GET .../messages/{id}/replies` |
+| Tool | Description |
+|------|-------------|
+| `teams_post_message` | Post a plain text/markdown message to the connected channel |
+| `teams_post_rich_message` | Post an Adaptive Card (rich structured message) to the connected channel |
 
-### Environment Requirements
-Must set in environment or `.env` file:
-- `TEAMS_ACCESS_TOKEN`: Microsoft Graph OAuth token
+**Note:** Unlike v0.1.x, these tools do NOT take `team_id` or `channel_id` parameters. The target conversation is determined by environment variables, which are set by the Bugzy execution context.
 
-### Required Microsoft Graph Permissions
-Your app registration needs these API permissions:
-- `Team.ReadBasic.All` - To list teams
-- `Channel.ReadBasic.All` - To list channels
-- `ChannelMessage.Send` - To post messages
-- `ChannelMessage.Read.All` - To read channel messages
+### Core Structure
+
+1. **Schemas** (`src/schemas.ts`):
+   - Adaptive Card schema for rich messages
+   - Request schemas for the two tools
+
+2. **Main Server** (`src/index.ts`):
+   - Bot Connector token acquisition (client credentials flow)
+   - Activity sending via Bot Connector REST API
+   - Tool registration and request handling
 
 ## Key Implementation Notes
 
-1. **Team ID Required**: Unlike Slack's flat channel structure, Teams channels are nested under teams. Most operations require both `team_id` and `channel_id`.
+1. **Token Caching**: Bot Connector tokens are cached for ~1 hour with automatic refresh.
 
-2. **Thread Replies**: Use `reply_to_id` (message ID) to reply to threads, not timestamps like Slack.
+2. **Thread Replies**: Use `thread_id` parameter or `TEAMS_THREAD_ID` env var to reply in a thread.
 
-3. **Adaptive Cards**: Rich messages use Microsoft's Adaptive Card format, not Slack Block Kit:
+3. **Adaptive Cards**: Use the `teams_post_rich_message` tool with a `card` parameter for structured content:
    ```json
    {
      "type": "AdaptiveCard",
      "version": "1.4",
      "body": [
-       { "type": "TextBlock", "text": "Hello!", "weight": "Bolder" }
+       { "type": "TextBlock", "text": "Test Results", "weight": "Bolder" },
+       { "type": "TextBlock", "text": "All 45 tests passed!", "wrap": true }
      ]
    }
    ```
 
-4. **HTML Content**: Plain messages support HTML formatting (`contentType: 'html'`).
+4. **Markdown Support**: Plain text messages support markdown formatting via the `textFormat: 'markdown'` property.
 
-5. **Type Safety**: All Microsoft Graph responses are parsed through Zod schemas.
+## Differences from v0.1.x (Graph API)
 
-6. **ES Modules**: Project uses `"type": "module"` - use ES import syntax.
-
-## Common Tasks
-
-### Adding a New Teams Tool
-1. Define request/response schemas in `src/schemas.ts`
-2. Add tool registration in `src/index.ts` server setup
-3. Implement handler following existing pattern: validate → API call → parse → return
-4. Update this documentation
-
-### Differences from Slack MCP
-
-| Aspect | Slack | Teams |
-|--------|-------|-------|
-| Channel structure | Flat list | Nested under teams |
-| Thread reference | `thread_ts` timestamp | `reply_to_id` message ID |
-| Rich messages | Block Kit JSON | Adaptive Cards JSON |
-| API client | `@slack/web-api` | `@microsoft/microsoft-graph-client` |
-| Token env var | `SLACK_BOT_TOKEN` | `TEAMS_ACCESS_TOKEN` |
-
-### Known API Limitations
-1. **Message History**: Limited to 50 messages per request
-2. **Rate Limiting**: Microsoft Graph rate limits apply
-3. **Permissions**: Operations require appropriate Graph API permissions
-4. **Reactions**: Microsoft Graph has limited reaction support compared to Slack
+| Aspect | v0.1.x (Graph API) | v0.2.0 (Bot Connector) |
+|--------|-------------------|------------------------|
+| API | Microsoft Graph | Bot Connector REST |
+| Auth | User access token | Bot client credentials |
+| Tools | 6 tools (list, post, read) | 2 tools (post only) |
+| Params | Required `team_id`, `channel_id` | From environment |
+| Identity | Posts as user | Posts as Bugzy bot |
 
 ## Adaptive Card Examples
 
@@ -124,7 +114,8 @@ Your app registration needs these API permissions:
     {
       "type": "TextBlock",
       "text": "All 45 tests passed!",
-      "wrap": true
+      "wrap": true,
+      "color": "Good"
     }
   ]
 }
@@ -141,34 +132,50 @@ Your app registration needs these API permissions:
       "facts": [
         { "title": "Passed", "value": "45" },
         { "title": "Failed", "value": "2" },
-        { "title": "Skipped", "value": "3" }
+        { "title": "Duration", "value": "3m 42s" }
       ]
     }
   ]
 }
 ```
 
-### Two-Column Layout
+### With Actions
 ```json
 {
   "type": "AdaptiveCard",
   "version": "1.4",
   "body": [
+    { "type": "TextBlock", "text": "Deployment Ready", "weight": "Bolder" }
+  ],
+  "actions": [
     {
-      "type": "ColumnSet",
-      "columns": [
-        {
-          "type": "Column",
-          "width": "auto",
-          "items": [{ "type": "TextBlock", "text": "Status:", "weight": "Bolder" }]
-        },
-        {
-          "type": "Column",
-          "width": "stretch",
-          "items": [{ "type": "TextBlock", "text": "Success", "color": "Good" }]
-        }
-      ]
+      "type": "Action.Submit",
+      "title": "Approve",
+      "style": "positive",
+      "data": { "action": "approve" }
+    },
+    {
+      "type": "Action.Submit",
+      "title": "Reject",
+      "style": "destructive",
+      "data": { "action": "reject" }
     }
   ]
 }
 ```
+
+## Common Tasks
+
+### Adding a New Feature to Card Schema
+1. Update the Zod schema in `src/schemas.ts`
+2. Test with `npm run build` to ensure types are correct
+3. Update this documentation with examples
+
+## Publishing
+
+```bash
+npm run clean && npm run build
+npm publish
+```
+
+The package is published to npmjs as `@bugzy-ai/teams-mcp-server`.

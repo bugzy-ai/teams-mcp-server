@@ -1,5 +1,19 @@
 #!/usr/bin/env node
 
+/**
+ * Teams MCP Server
+ *
+ * MCP server for posting messages to Microsoft Teams via Bot Connector API.
+ * Used by the Bugzy agent to send notifications and responses to Teams channels.
+ *
+ * Environment variables (set by execution context):
+ * - TEAMS_BOT_APP_ID: Bot application ID
+ * - TEAMS_BOT_APP_PASSWORD: Bot application password
+ * - TEAMS_SERVICE_URL: Bot Connector service URL (from conversation reference)
+ * - TEAMS_CONVERSATION_ID: Conversation/channel ID (from conversation reference)
+ * - TEAMS_THREAD_ID: Optional - for replying to specific thread
+ */
+
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -7,42 +21,175 @@ import {
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { Client } from '@microsoft/microsoft-graph-client';
 import dotenv from 'dotenv';
 import {
-  ListTeamsRequestSchema,
-  ListChannelsRequestSchema,
   PostMessageRequestSchema,
   PostRichMessageRequestSchema,
-  GetChannelHistoryRequestSchema,
-  GetThreadRepliesRequestSchema,
-  ListTeamsResponseSchema,
-  ListChannelsResponseSchema,
-  GetMessagesResponseSchema,
-  GetRepliesResponseSchema,
+  type AdaptiveCard,
 } from './schemas.js';
 
 dotenv.config();
 
-if (!process.env.TEAMS_ACCESS_TOKEN) {
-  console.error(
-    'TEAMS_ACCESS_TOKEN is not set. Please set it in your environment or .env file.'
-  );
-  process.exit(1);
+// Token cache for Bot Connector API
+let tokenCache: { token: string; expiresAt: number } | null = null;
+
+/**
+ * Get an access token for the Bot Connector API
+ */
+async function getBotConnectorToken(): Promise<string> {
+  const now = Date.now();
+
+  // Check cache (with 5 minute buffer before expiry)
+  if (tokenCache && tokenCache.expiresAt > now + 5 * 60 * 1000) {
+    return tokenCache.token;
+  }
+
+  const appId = process.env.TEAMS_BOT_APP_ID;
+  const appPassword = process.env.TEAMS_BOT_APP_PASSWORD;
+
+  if (!appId || !appPassword) {
+    throw new Error(
+      'TEAMS_BOT_APP_ID and TEAMS_BOT_APP_PASSWORD must be set'
+    );
+  }
+
+  // Request token from Microsoft identity platform
+  const tokenUrl =
+    'https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token';
+
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: appId,
+    client_secret: appPassword,
+    scope: 'https://api.botframework.com/.default',
+  });
+
+  const response = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[TeamsMCP] Token request failed:', errorText);
+    throw new Error(`Failed to get Bot Connector token: ${response.status}`);
+  }
+
+  let data: { access_token: string; expires_in: number };
+  try {
+    data = (await response.json()) as { access_token: string; expires_in: number };
+  } catch {
+    throw new Error('Failed to parse Bot Connector token response as JSON');
+  }
+
+  if (!data.access_token || typeof data.expires_in !== 'number') {
+    throw new Error('Invalid token response: missing access_token or expires_in');
+  }
+
+  // Cache the token
+  tokenCache = {
+    token: data.access_token,
+    expiresAt: now + data.expires_in * 1000,
+  };
+
+  return data.access_token;
 }
 
-// Initialize Microsoft Graph client with access token
-const graphClient = Client.init({
-  authProvider: (done) => {
-    done(null, process.env.TEAMS_ACCESS_TOKEN!);
-  },
-});
+/**
+ * Send an activity to Teams via Bot Connector API
+ */
+async function sendActivity(
+  serviceUrl: string,
+  conversationId: string,
+  activity: Record<string, unknown>,
+  replyToId?: string
+): Promise<{ id: string }> {
+  const token = await getBotConnectorToken();
+
+  // Remove trailing slash from service URL if present
+  const baseUrl = serviceUrl.endsWith('/') ? serviceUrl.slice(0, -1) : serviceUrl;
+
+  let url: string;
+  if (replyToId) {
+    // Reply to existing activity (thread reply)
+    url = `${baseUrl}/v3/conversations/${encodeURIComponent(conversationId)}/activities/${encodeURIComponent(replyToId)}`;
+  } else {
+    // New activity in conversation
+    url = `${baseUrl}/v3/conversations/${encodeURIComponent(conversationId)}/activities`;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      type: 'message',
+      ...activity,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[TeamsMCP] Send activity failed:', errorText);
+    throw new Error(`Failed to send activity: ${response.status} - ${errorText}`);
+  }
+
+  let result: { id: string };
+  try {
+    result = (await response.json()) as { id: string };
+  } catch {
+    throw new Error('Failed to parse send activity response as JSON');
+  }
+
+  return result;
+}
+
+/**
+ * Get required environment variables
+ */
+function getEnvConfig(): { serviceUrl: string; conversationId: string; threadId?: string } {
+  const serviceUrl = process.env.TEAMS_SERVICE_URL;
+  const conversationId = process.env.TEAMS_CONVERSATION_ID;
+  const threadId = process.env.TEAMS_THREAD_ID;
+
+  if (!serviceUrl) {
+    throw new Error('TEAMS_SERVICE_URL is not set');
+  }
+  if (!conversationId) {
+    throw new Error('TEAMS_CONVERSATION_ID is not set');
+  }
+
+  return { serviceUrl, conversationId, threadId };
+}
+
+/**
+ * Resolve thread context from args and config
+ * Returns the replyToId (if any) and appropriate action description
+ */
+function resolveThreadContext(
+  argsThreadId: string | undefined,
+  configThreadId: string | undefined,
+  messageType: 'message' | 'rich'
+): { replyToId: string | undefined; actionType: string } {
+  const replyToId = argsThreadId || configThreadId;
+  const actionType = replyToId
+    ? 'Reply sent to thread'
+    : messageType === 'rich'
+      ? 'Rich message posted'
+      : 'Message posted';
+  return { replyToId, actionType };
+}
 
 function createServer(): Server {
   const server = new Server(
     {
       name: 'teams-mcp-server',
-      version: '0.0.1',
+      version: '0.2.0',
     },
     {
       capabilities: {
@@ -55,37 +202,16 @@ function createServer(): Server {
     return {
       tools: [
         {
-          name: 'teams_list_teams',
-          description: 'List all Microsoft Teams that the user has joined',
-          inputSchema: zodToJsonSchema(ListTeamsRequestSchema),
-        },
-        {
-          name: 'teams_list_channels',
-          description: 'List all channels in a Microsoft Teams team',
-          inputSchema: zodToJsonSchema(ListChannelsRequestSchema),
-        },
-        {
           name: 'teams_post_message',
           description:
-            'Post a plain text or HTML message to a Microsoft Teams channel or reply to a thread',
+            'Post a plain text message to the connected Microsoft Teams channel. Use this for simple messages and notifications.',
           inputSchema: zodToJsonSchema(PostMessageRequestSchema),
         },
         {
           name: 'teams_post_rich_message',
           description:
-            'Post a rich structured message to Microsoft Teams with Adaptive Card support. Can post to channels or reply to threads. Supports text, images, fact sets, column layouts, and more.',
+            'Post a rich structured message to Microsoft Teams with Adaptive Card support. Use this for formatted content like test results, status updates, or any content that benefits from structured layout.',
           inputSchema: zodToJsonSchema(PostRichMessageRequestSchema),
-        },
-        {
-          name: 'teams_get_channel_history',
-          description:
-            'Get recent messages from a Microsoft Teams channel. Returns messages in reverse chronological order.',
-          inputSchema: zodToJsonSchema(GetChannelHistoryRequestSchema),
-        },
-        {
-          name: 'teams_get_thread_replies',
-          description: 'Get all replies in a message thread',
-          inputSchema: zodToJsonSchema(GetThreadRepliesRequestSchema),
         },
       ],
     };
@@ -97,54 +223,35 @@ function createServer(): Server {
         throw new Error('Params are required');
       }
 
+      // Get environment configuration
+      const config = getEnvConfig();
+
       switch (request.params.name) {
-        case 'teams_list_teams': {
-          const response = await graphClient.api('/me/joinedTeams').get();
-          const parsed = ListTeamsResponseSchema.parse(response);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(parsed.value) }],
-          };
-        }
-
-        case 'teams_list_channels': {
-          const args = ListChannelsRequestSchema.parse(
-            request.params.arguments
-          );
-          const response = await graphClient
-            .api(`/teams/${args.team_id}/channels`)
-            .get();
-          const parsed = ListChannelsResponseSchema.parse(response);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(parsed.value) }],
-          };
-        }
-
         case 'teams_post_message': {
           const args = PostMessageRequestSchema.parse(request.params.arguments);
+          const { replyToId, actionType } = resolveThreadContext(
+            args.thread_id,
+            config.threadId,
+            'message'
+          );
 
-          const messageBody = {
-            body: {
-              contentType: 'html',
-              content: args.text,
+          const result = await sendActivity(
+            config.serviceUrl,
+            config.conversationId,
+            {
+              text: args.text,
+              textFormat: 'markdown',
             },
-          };
+            replyToId
+          );
 
-          let endpoint: string;
-          if (args.reply_to_id) {
-            // Reply to a thread
-            endpoint = `/teams/${args.team_id}/channels/${args.channel_id}/messages/${args.reply_to_id}/replies`;
-          } else {
-            // New message in channel
-            endpoint = `/teams/${args.team_id}/channels/${args.channel_id}/messages`;
-          }
-
-          await graphClient.api(endpoint).post(messageBody);
-
-          const actionType = args.reply_to_id
-            ? 'Reply sent to thread'
-            : 'Message posted';
           return {
-            content: [{ type: 'text', text: `${actionType} successfully` }],
+            content: [
+              {
+                type: 'text',
+                text: `${actionType} successfully (id: ${result.id})`,
+              },
+            ],
           };
         }
 
@@ -152,82 +259,47 @@ function createServer(): Server {
           const args = PostRichMessageRequestSchema.parse(
             request.params.arguments
           );
+          const { replyToId, actionType } = resolveThreadContext(
+            args.thread_id,
+            config.threadId,
+            'rich'
+          );
 
-          let messageBody: Record<string, unknown>;
+          let activity: Record<string, unknown>;
 
           if (args.card) {
             // Post with Adaptive Card attachment
-            // Microsoft Teams API requires an attachment marker in the body content
-            const textContent = args.text ? args.text + ' ' : '';
-            messageBody = {
-              body: {
-                contentType: 'html',
-                content: textContent + '<attachment id="1"></attachment>',
-              },
+            activity = {
+              text: args.text || '',
               attachments: [
                 {
-                  id: '1',
                   contentType: 'application/vnd.microsoft.card.adaptive',
-                  content: JSON.stringify(args.card),
+                  content: args.card,
                 },
               ],
             };
           } else {
-            // Plain HTML message
-            messageBody = {
-              body: {
-                contentType: 'html',
-                content: args.text,
-              },
+            // Plain text with markdown
+            activity = {
+              text: args.text || '',
+              textFormat: 'markdown',
             };
           }
 
-          let endpoint: string;
-          if (args.reply_to_id) {
-            endpoint = `/teams/${args.team_id}/channels/${args.channel_id}/messages/${args.reply_to_id}/replies`;
-          } else {
-            endpoint = `/teams/${args.team_id}/channels/${args.channel_id}/messages`;
-          }
-
-          await graphClient.api(endpoint).post(messageBody);
-
-          const actionType = args.reply_to_id
-            ? 'Reply sent to thread'
-            : 'Rich message posted';
-          return {
-            content: [{ type: 'text', text: `${actionType} successfully` }],
-          };
-        }
-
-        case 'teams_get_channel_history': {
-          const args = GetChannelHistoryRequestSchema.parse(
-            request.params.arguments
+          const result = await sendActivity(
+            config.serviceUrl,
+            config.conversationId,
+            activity,
+            replyToId
           );
-          const response = await graphClient
-            .api(
-              `/teams/${args.team_id}/channels/${args.channel_id}/messages`
-            )
-            .top(args.top || 20)
-            .get();
-          const parsed = GetMessagesResponseSchema.parse(response);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(parsed.value) }],
-          };
-        }
 
-        case 'teams_get_thread_replies': {
-          const args = GetThreadRepliesRequestSchema.parse(
-            request.params.arguments
-          );
-          const response = await graphClient
-            .api(
-              `/teams/${args.team_id}/channels/${args.channel_id}/messages/${args.message_id}/replies`
-            )
-            .top(args.top || 20)
-            .get();
-          const parsed = GetRepliesResponseSchema.parse(response);
           return {
-            content: [{ type: 'text', text: JSON.stringify(parsed.value) }],
+            content: [
+              {
+                type: 'text',
+                text: `${actionType} successfully (id: ${result.id})`,
+              },
+            ],
           };
         }
 
@@ -235,7 +307,7 @@ function createServer(): Server {
           throw new Error(`Unknown tool: ${request.params.name}`);
       }
     } catch (error) {
-      console.error('Error handling request:', error);
+      console.error('[TeamsMCP] Error handling request:', error);
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error occurred';
       throw new Error(errorMessage);
@@ -246,14 +318,27 @@ function createServer(): Server {
 }
 
 async function runStdioServer() {
+  // Validate required environment variables on startup
+  const appId = process.env.TEAMS_BOT_APP_ID;
+  const appPassword = process.env.TEAMS_BOT_APP_PASSWORD;
+
+  if (!appId || !appPassword) {
+    console.error(
+      'TEAMS_BOT_APP_ID and TEAMS_BOT_APP_PASSWORD must be set.'
+    );
+    console.error(
+      'These are the Azure Bot credentials, set by the execution environment.'
+    );
+    process.exit(1);
+  }
+
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Teams MCP Server running on stdio');
+  console.error('Teams MCP Server v0.2.0 running on stdio (Bot Connector API)');
 }
 
 async function main() {
-  // Run with stdio transport
   await runStdioServer();
 }
 

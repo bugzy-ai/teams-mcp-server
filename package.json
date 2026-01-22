@@ -1,7 +1,7 @@
 {
   "name": "@bugzy-ai/teams-mcp-server",
-  "version": "0.1.1",
-  "description": "An MCP server for Microsoft Teams messaging and channel operations with stdio transport",
+  "version": "0.2.0",
+  "description": "An MCP server for Microsoft Teams messaging via Bot Connector API",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
@@ -52,7 +52,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@microsoft/microsoft-graph-client": "^3.0.7",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.7",
     "zod": "^3.22.4",
