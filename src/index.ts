@@ -9,6 +9,7 @@
  * Environment variables (set by execution context):
  * - TEAMS_BOT_APP_ID: Bot application ID
  * - TEAMS_BOT_APP_PASSWORD: Bot application password
+ * - TEAMS_BOT_TENANT_ID: Optional - Azure AD tenant ID for single-tenant bots
  * - TEAMS_SERVICE_URL: Bot Connector service URL (from conversation reference)
  * - TEAMS_CONVERSATION_ID: Conversation/channel ID (from conversation reference)
  * - TEAMS_THREAD_ID: Optional - for replying to specific thread
@@ -46,6 +47,7 @@ async function getBotConnectorToken(): Promise<string> {
 
   const appId = process.env.TEAMS_BOT_APP_ID;
   const appPassword = process.env.TEAMS_BOT_APP_PASSWORD;
+  const tenantId = process.env.TEAMS_BOT_TENANT_ID;
 
   if (!appId || !appPassword) {
     throw new Error(
@@ -53,9 +55,9 @@ async function getBotConnectorToken(): Promise<string> {
     );
   }
 
-  // Request token from Microsoft identity platform
-  const tokenUrl =
-    'https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token';
+  // Use tenant-specific endpoint for single-tenant bots, otherwise use multi-tenant
+  const tokenAuthority = tenantId || 'botframework.com';
+  const tokenUrl = `https://login.microsoftonline.com/${tokenAuthority}/oauth2/v2.0/token`;
 
   const body = new URLSearchParams({
     grant_type: 'client_credentials',
@@ -75,7 +77,7 @@ async function getBotConnectorToken(): Promise<string> {
   if (!response.ok) {
     const errorText = await response.text();
     console.error('[TeamsMCP] Token request failed:', errorText);
-    throw new Error(`Failed to get Bot Connector token: ${response.status}`);
+    throw new Error(`Failed to get Bot Connector token: ${response.status} - ${errorText}`);
   }
 
   let data: { access_token: string; expires_in: number };

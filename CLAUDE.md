@@ -42,8 +42,11 @@ TEAMS_SERVICE_URL=<Bot Connector service URL, e.g., https://smba.trafficmanager.
 TEAMS_CONVERSATION_ID=<Teams conversation/channel ID>
 
 # Optional
+TEAMS_BOT_TENANT_ID=<Azure AD tenant ID for single-tenant bots>
 TEAMS_THREAD_ID=<Activity ID to reply to in a thread>
 ```
+
+**Note on Tenant ID:** For single-tenant bots (registered in a specific Azure AD tenant), set `TEAMS_BOT_TENANT_ID` to your tenant GUID. This changes the token endpoint from `botframework.com` to your tenant-specific endpoint. Multi-tenant bots can omit this variable.
 
 ### Available Tools
 
