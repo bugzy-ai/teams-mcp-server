@@ -108,6 +108,7 @@ async function sendActivity(
   replyToId?: string
 ): Promise<{ id: string }> {
   const token = await getBotConnectorToken();
+  const botAppId = process.env.TEAMS_BOT_APP_ID;
 
   // Remove trailing slash from service URL if present
   const baseUrl = serviceUrl.endsWith('/') ? serviceUrl.slice(0, -1) : serviceUrl;
@@ -129,6 +130,10 @@ async function sendActivity(
     },
     body: JSON.stringify({
       type: 'message',
+      from: {
+        id: botAppId,
+        name: 'Bugzy',
+      },
       ...activity,
     }),
   });
@@ -189,7 +194,7 @@ function createServer(): Server {
   const server = new Server(
     {
       name: 'teams-mcp-server',
-      version: '0.2.0',
+      version: '0.2.1',
     },
     {
       capabilities: {
@@ -335,7 +340,7 @@ async function runStdioServer() {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Teams MCP Server v0.2.0 running on stdio (Bot Connector API)');
+  console.error('Teams MCP Server v0.2.1 running on stdio (Bot Connector API)');
 }
 
 async function main() {
